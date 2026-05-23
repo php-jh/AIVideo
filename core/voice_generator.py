@@ -65,6 +65,25 @@ class VoiceGenerator:
         # 用于分配音色的计数器
         self._male_voice_index = 0
         self._female_voice_index = 0
+        self._script_characters: List[dict] = []
+
+    def _gender_for_character(self, character: str) -> str:
+        for ch in self._script_characters:
+            if isinstance(ch, dict) and (ch.get("name") or "").strip() == character:
+                return (ch.get("gender") or "male").strip().lower()
+        return "male"
+
+    def _rate_for_character(self, character: str, gender: str) -> str:
+        """老人略慢、大妈略快，增强区分度。"""
+        if self.config.get("elderly_daily_mode"):
+            g = gender or self._gender_for_character(character)
+            if g == "female":
+                return "-5%"
+            # 默认男老人
+            if character and any(k in character for k in ("大爷", "叔", "爷", "伯")):
+                return "-12%"
+            return "-8%"
+        return "-10%" if gender == "female" else "+0%"
 
     def seed_voices_from_characters(self, script_characters: Optional[List[dict]] = None) -> None:
         """从剧本 characters[].tts_voice 预置角色音色。"""
@@ -249,9 +268,7 @@ class VoiceGenerator:
         """
         # 使用角色固定音色，确保同一角色始终使用同一音色
         voice = self.get_character_voice(character, gender)
-
-        # 女性角色使用更温柔的语调（稍慢语速）
-        rate = "-10%" if gender == "female" else "+0%"
+        rate = self._rate_for_character(character, gender)
 
         if on_progress:
             on_progress(f"正在生成 {character} 的配音...")
@@ -262,7 +279,8 @@ class VoiceGenerator:
         )
 
     def generate_scene_audio(self, scene, output_dir: str,
-                             on_progress=None) -> str:
+                             on_progress=None,
+                             script_characters=None) -> str:
         """
         为单个场景生成完整音频（旁白+对话）
 
@@ -275,6 +293,9 @@ class VoiceGenerator:
             生成的音频文件路径
         """
         os.makedirs(output_dir, exist_ok=True)
+        if script_characters:
+            self._script_characters = list(script_characters)
+            self.seed_voices_from_characters(script_characters)
 
         has_narration = bool(scene.narration and scene.narration.strip())
         has_dialogues = bool(scene.dialogues)
@@ -311,13 +332,15 @@ class VoiceGenerator:
             # 只有对话
             if len(scene.dialogues) == 1:
                 d = scene.dialogues[0]
+                char = d.get("character", "")
+                gender = d.get("gender") or self._gender_for_character(char)
+                voice = self.get_character_voice(char, gender)
+                rate = self._rate_for_character(char, gender)
                 if on_progress:
-                    on_progress(f"正在生成 {d['character']} 的配音...")
+                    on_progress(f"正在生成 {char} 的配音...")
                 asyncio.run(
                     self._generate_audio_async(
-                        d["line"],
-                        self.male_voice if d.get("gender", "male") == "male" else self.female_voice,
-                        filepath,
+                        d["line"], voice, filepath, rate=rate,
                     )
                 )
                 scene.audio_path = filepath
@@ -356,10 +379,10 @@ class VoiceGenerator:
                     f"temp_dialogue_{scene.scene_number}_{i}.mp3"
                 )
                 # 使用角色固定音色
-                gender = d.get("gender", "male")
-                voice = self.get_character_voice(d["character"], gender)
-                # 女性角色使用更温柔的语调
-                rate = "-10%" if gender == "female" else "+0%"
+                char = d.get("character", "")
+                gender = d.get("gender") or self._gender_for_character(char)
+                voice = self.get_character_voice(char, gender)
+                rate = self._rate_for_character(char, gender)
                 if on_progress:
                     on_progress(f"正在生成 {d['character']} 的配音...")
                 asyncio.run(
@@ -430,10 +453,10 @@ class VoiceGenerator:
                     f"temp_dialogue_{scene.scene_number}_{i}.mp3"
                 )
                 # 使用角色固定音色
-                gender = d.get("gender", "male")
-                voice = self.get_character_voice(d["character"], gender)
-                # 女性角色使用更温柔的语调
-                rate = "-10%" if gender == "female" else "+0%"
+                char = d.get("character", "")
+                gender = d.get("gender") or self._gender_for_character(char)
+                voice = self.get_character_voice(char, gender)
+                rate = self._rate_for_character(char, gender)
                 if on_progress:
                     on_progress(f"正在生成 {d['character']} 的配音...")
                 asyncio.run(
@@ -480,6 +503,7 @@ class VoiceGenerator:
         Returns:
             音频路径列表
         """
+        self._script_characters = list(script_characters or [])
         self.seed_voices_from_characters(script_characters)
         audio_paths = []
         total = len(scenes)
@@ -489,7 +513,10 @@ class VoiceGenerator:
                 if on_progress:
                     on_progress(i + 1, total, msg)
 
-            filepath = self.generate_scene_audio(scene, output_dir, progress_wrapper)
+            filepath = self.generate_scene_audio(
+                scene, output_dir, progress_wrapper,
+                script_characters=script_characters,
+            )
             audio_paths.append(filepath)
 
         return audio_paths

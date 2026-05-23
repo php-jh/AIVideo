@@ -58,13 +58,18 @@ class VideoComposer:
             输出文件路径
         """
         logger.info(f"开始合成视频，共 {len(scenes)} 个场景")
-        
+
+        if self.config.get("single_take") and len(scenes) > 1:
+            return self._compose_single_take(scenes, output_path, on_progress)
+
         from moviepy.editor import (
             ImageClip, AudioFileClip, CompositeVideoClip,
             concatenate_videoclips, ColorClip, VideoFileClip
         )
 
         total = len(scenes)
+        single_take = bool(self.config.get("single_take"))
+        elderly_daily = bool(self.config.get("elderly_daily_mode"))
         clips = []
         motion_tmpdir = None
 
@@ -79,8 +84,10 @@ class VideoComposer:
 
             logger.debug(f"处理场景 {i+1}/{total}")
 
-            # 优先使用动态视频片段
+            # 优先使用动态视频片段（口播一镜到底强制静图，避免动效与旁白无关）
             video_path = getattr(scene, "video_path", None)
+            if single_take:
+                video_path = None
             clip = None
 
             if video_path and os.path.exists(video_path):
@@ -101,7 +108,7 @@ class VideoComposer:
                     saved_vp = getattr(scene, "video_path", None) or ""
                     try:
                         from core.video_generator import VideoGenerator
-                        vg = VideoGenerator()
+                        vg = VideoGenerator(self.config)
                         vg.generate_scene_video(
                             scene,
                             motion_tmpdir,
@@ -119,10 +126,15 @@ class VideoComposer:
                     finally:
                         scene.video_path = saved_vp
                 if clip is None:
-                    clip = self._create_image_clip_with_ken_burns(
-                        scene.image_path, scene.duration
-                    )
-                    logger.debug(f"使用 Ken Burns 效果: {scene.image_path}")
+                    if single_take or (elderly_daily and not getattr(scene, "dialogues", None)):
+                        clip = self._create_single_take_visual_clip(
+                            scene.image_path, scene.duration
+                        )
+                    else:
+                        clip = self._create_image_clip_with_ken_burns(
+                            scene.image_path, scene.duration
+                        )
+                    logger.debug(f"使用画面: {scene.image_path}")
             else:
                 # 都没有，生成占位图片
                 from PIL import Image, ImageDraw, ImageFont
@@ -153,7 +165,8 @@ class VideoComposer:
 
             # 添加字幕（时长已与配音一致）
             subtitle_clips = SubtitleGenerator.create_subtitle_clips_for_scene(
-                scene, 0, self.width, self.height
+                scene, 0, self.width, self.height,
+                segment_long_narration=single_take,
             )
             if subtitle_clips:
                 clip = CompositeVideoClip([clip] + subtitle_clips)
@@ -222,6 +235,121 @@ class VideoComposer:
 
         logger.info(f"视频合成完成: {output_path}")
         return output_path
+
+    def _compose_single_take(
+        self,
+        scenes: List[StoryboardScene],
+        output_path: str,
+        on_progress=None,
+    ) -> str:
+        """多镜旧稿合并为单画面 + 串联配音（口播一镜到底）。"""
+        from moviepy.editor import (
+            AudioFileClip, CompositeVideoClip, concatenate_audioclips,
+        )
+
+        total = len(scenes)
+        if on_progress:
+            on_progress(0, total, "一镜到底合成：合并配音与画面…")
+
+        image_path = None
+        for s in scenes:
+            ip = getattr(s, "image_path", None)
+            if ip and os.path.exists(ip):
+                image_path = ip
+                break
+        if not image_path:
+            raise ValueError("一镜到底合成需要至少一张分镜图或角色参考图，请先生成图片。")
+
+        audio_parts = []
+        for s in scenes:
+            ap = getattr(s, "audio_path", None)
+            if ap and os.path.exists(ap) and os.path.getsize(ap) > 100:
+                try:
+                    audio_parts.append(AudioFileClip(ap))
+                except Exception as e:
+                    logger.warning(f"加载音频失败 {ap}: {e}")
+
+        if audio_parts:
+            audio_clip = (
+                audio_parts[0]
+                if len(audio_parts) == 1
+                else concatenate_audioclips(audio_parts)
+            )
+            duration = float(audio_clip.duration)
+        else:
+            audio_clip = None
+            duration = sum(float(getattr(s, "duration", 5) or 5) for s in scenes)
+
+        visual = self._create_single_take_visual_clip(image_path, duration)
+
+        text_parts = []
+        for s in scenes:
+            n = (getattr(s, "narration", None) or "").strip()
+            if n:
+                text_parts.append(n)
+            for d in getattr(s, "dialogues", []) or []:
+                if isinstance(d, dict):
+                    line = (d.get("line") or "").strip()
+                    ch = (d.get("character") or "").strip()
+                    if line:
+                        text_parts.append(f"{ch}：{line}" if ch else line)
+        full_text = "\n".join(text_parts)
+
+        subtitle_clips = []
+        if full_text:
+            subtitle_clips = SubtitleGenerator.create_subtitle_clips_segmented(
+                full_text, duration, self.width, self.height, 0.0
+            )
+        if subtitle_clips:
+            visual = CompositeVideoClip([visual] + subtitle_clips)
+        if audio_clip is not None:
+            visual = visual.set_audio(audio_clip)
+
+        os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+        if on_progress:
+            on_progress(total, total, "正在编码一镜到底成片…")
+        try:
+            visual.write_videofile(
+                output_path,
+                fps=self.fps,
+                codec="libx264",
+                audio_codec="aac",
+                preset="medium",
+                threads=4,
+                logger=None,
+            )
+        finally:
+            visual.close()
+            for ac in audio_parts:
+                try:
+                    ac.close()
+                except Exception:
+                    pass
+            gc.collect()
+
+        if on_progress:
+            on_progress(total, total, f"一镜到底成片完成：{output_path}")
+        return output_path
+
+    def _create_single_take_visual_clip(self, image_path: str, duration: float):
+        """口播固定机位：极轻微缩放，避免多镜幻灯片感。"""
+        from moviepy.editor import ImageClip, ColorClip, CompositeVideoClip
+
+        duration = max(float(duration or 1), 0.5)
+        bg = ColorClip(size=(self.width, self.height), color=(0, 0, 0), duration=duration)
+        clip = ImageClip(image_path, duration=duration)
+        img_ratio = clip.w / clip.h
+        target_ratio = self.width / self.height
+        if img_ratio > target_ratio:
+            new_h = self.height
+            new_w = int(new_h * img_ratio)
+        else:
+            new_w = self.width
+            new_h = int(new_w / img_ratio)
+        clip = clip.resize((new_w, new_h))
+        clip = clip.resize(lambda t: 1.0 + 0.03 * (t / duration))
+        clip = clip.set_position("center")
+        return CompositeVideoClip([bg, clip], size=(self.width, self.height))
 
     def _create_image_clip_with_ken_burns(self, image_path: str, duration: float):
         """

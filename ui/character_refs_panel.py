@@ -33,6 +33,19 @@ _BTN_STYLE_SECONDARY = (
 )
 
 
+def resolve_character_image_path(ch: dict) -> str:
+    """角色展示图：优先用户 reference_image，否则 AI 定妆照 portrait_path。"""
+    if not isinstance(ch, dict):
+        return ""
+    ref = (ch.get("reference_image") or "").strip()
+    if ref and os.path.isfile(ref):
+        return os.path.abspath(ref)
+    portrait = (ch.get("portrait_path") or "").strip()
+    if portrait and os.path.isfile(portrait):
+        return os.path.abspath(portrait)
+    return ""
+
+
 def _btn_style(primary: bool, compact: bool) -> str:
     h = "32px" if compact else "40px"
     fs = "12px" if compact else "14px"
@@ -238,9 +251,14 @@ class CharacterRefCard(QFrame):
             for k in ("age", "gender", "personality"):
                 if k in existing:
                     ch[k] = existing[k]
+            for k in ("portrait_path", "reference_image"):
+                v = (existing.get(k) or "").strip()
+                if v and os.path.isfile(v):
+                    ch[k] = os.path.abspath(v)
         ref = self.get_reference_path()
         if ref:
             ch["reference_image"] = ref
+            ch["portrait_path"] = ref
         voice = self.get_tts_voice()
         if voice:
             ch["tts_voice"] = voice
@@ -424,7 +442,7 @@ class CharacterRefsPanel(QWidget):
                     continue
                 self.add_card(
                     ch.get("name", ""),
-                    ch.get("reference_image", ""),
+                    resolve_character_image_path(ch),
                     ch.get("tts_voice", ""),
                 )
         else:
@@ -453,14 +471,20 @@ class CharacterRefsPanel(QWidget):
             if not isinstance(ch, dict):
                 continue
             n = (ch.get("name") or "").strip()
-            p = (ch.get("reference_image") or "").strip()
-            if n and p and os.path.isfile(p):
-                refs_by_name[n] = os.path.abspath(p)
+            p = resolve_character_image_path(ch)
+            if n and p:
+                refs_by_name[n] = p
             tv = (ch.get("tts_voice") or "").strip()
             if n and tv:
                 voices_by_name[n] = tv
 
-        names = self.collect_character_names_from_script()
+        script_names = []
+        for ch in script.get("characters") or []:
+            if isinstance(ch, dict):
+                n = (ch.get("name") or "").strip()
+                if n:
+                    script_names.append(n)
+        names = script_names if script_names else self.collect_character_names_from_script()
         if not names and not refs_by_name:
             if not self._cards:
                 self.add_card()
@@ -478,8 +502,19 @@ class CharacterRefsPanel(QWidget):
             )
         if not self._cards:
             self.add_card()
-        self.apply_to_script(script)
         self._update_status()
+
+    @staticmethod
+    def _voice_short_labels() -> set:
+        """Edge TTS 音色在界面上的简称，避免误当作剧本角色名。"""
+        from core.voice_generator import VoiceGenerator
+
+        labels = set()
+        for desc in VoiceGenerator.VOICE_MAP.values():
+            short = desc.split("（")[0].strip() if "（" in desc else desc[:8].strip()
+            if short:
+                labels.add(short)
+        return labels
 
     def collect_character_names_from_script(self) -> List[str]:
         """从剧本 characters + 各镜对话收集角色名（去重、保序）。"""
@@ -488,15 +523,24 @@ class CharacterRefsPanel(QWidget):
         if not self._script:
             return names
 
-        def add(n: str):
+        tts_labels = self._voice_short_labels()
+        script_char_names = set()
+
+        def add(n: str, *, from_script_char: bool = False):
             n = (n or "").strip()
-            if n and n not in seen:
-                seen.add(n)
-                names.append(n)
+            if not n or n in seen:
+                return
+            if not from_script_char and n in tts_labels and n not in script_char_names:
+                return
+            seen.add(n)
+            names.append(n)
 
         for ch in self._script.get("characters") or []:
             if isinstance(ch, dict):
-                add(ch.get("name", ""))
+                cn = (ch.get("name") or "").strip()
+                if cn:
+                    script_char_names.add(cn)
+                add(cn, from_script_char=True)
 
         for scene in self._script.get("scenes") or []:
             if not isinstance(scene, dict):
@@ -532,7 +576,7 @@ class CharacterRefsPanel(QWidget):
         for name in names:
             if name not in existing_by_name:
                 old = self._find_existing_char(name)
-                ref = old.get("reference_image", "") if old else ""
+                ref = resolve_character_image_path(old) if old else ""
                 voice = (old.get("tts_voice") or "") if old else ""
                 self.add_card(name, ref, voice)
 
@@ -598,9 +642,78 @@ class CharacterRefsPanel(QWidget):
     def has_any_reference(self) -> bool:
         return any(c.get_reference_path() for c in self._cards)
 
-    def load_portraits_from_dir(self, portrait_dir: str) -> int:
+    def refresh_images_from_script(self, script: Optional[dict] = None) -> int:
+        """
+        将剧本中的 reference_image / portrait_path 回显到对应角色卡片。
+        返回更新的卡片数量。
+        """
+        target = script if script is not None else self._script
+        if not target:
+            return 0
+
+        by_name: Dict[str, dict] = {}
+        for ch in target.get("characters") or []:
+            if isinstance(ch, dict):
+                n = (ch.get("name") or "").strip()
+                if n:
+                    by_name[n] = ch
+
+        matched = 0
+        for card in self._cards:
+            name = card.get_name().strip()
+            if not name or name not in by_name:
+                continue
+            path = resolve_character_image_path(by_name[name])
+            if not path:
+                continue
+            current = card.get_reference_path()
+            if current and os.path.abspath(current) == os.path.abspath(path):
+                continue
+            card.set_reference_image(path)
+            matched += 1
+
+        if matched == 0:
+            from config import get_output_dir
+            from core.character_portraits import sync_portraits_from_disk_to_script
+
+            sync_portraits_from_disk_to_script(target, get_output_dir())
+            for ch in target.get("characters") or []:
+                if isinstance(ch, dict):
+                    n = (ch.get("name") or "").strip()
+                    if n:
+                        by_name[n] = ch
+            for card in self._cards:
+                name = card.get_name().strip()
+                if not name:
+                    continue
+                ch = by_name.get(name)
+                if not isinstance(ch, dict):
+                    continue
+                path = resolve_character_image_path(ch)
+                if not path:
+                    continue
+                current = card.get_reference_path()
+                if current and os.path.abspath(current) == os.path.abspath(path):
+                    continue
+                card.set_reference_image(path)
+                matched += 1
+            if matched == 0:
+                portrait_dir = os.path.join(
+                    get_output_dir(), "images", "character_portraits"
+                )
+                matched = self.load_portraits_from_dir(portrait_dir, overwrite=False)
+
+        if matched > 0:
+            self._update_status()
+            if self._script is target:
+                self.apply_to_script(target)
+
+        return matched
+
+    def load_portraits_from_dir(self, portrait_dir: str, overwrite: bool = False) -> int:
         """
         从定妆照目录加载已生成的角色头像，自动匹配到对应角色卡片。
+        overwrite=False 时仅填充尚未有图的卡片。
         返回匹配数量。
         """
         if not os.path.isdir(portrait_dir):
@@ -608,7 +721,9 @@ class CharacterRefsPanel(QWidget):
         matched = 0
         for card in self._cards:
             name = card.get_name()
-            if not name or card.get_reference_path():
+            if not name:
+                continue
+            if card.get_reference_path() and not overwrite:
                 continue
             from core.character_portraits import safe_char_filename
             safe = safe_char_filename(name)

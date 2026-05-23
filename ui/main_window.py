@@ -58,6 +58,25 @@ class Worker(QObject):
         style = self.kwargs.get("style", "")
         return merge_config_for_style(base, style) if style else base
 
+    def _normalize_script_if_tech(self, script):
+        """旧多镜口播稿在生成/合成前合并为一镜到底。"""
+        from core.style_presets import is_tech_explainer_style
+        if not script or not is_tech_explainer_style(self.kwargs.get("style", "")):
+            return script
+        from core.tech_explainer_pipeline import normalize_tech_explainer_script
+        return normalize_tech_explainer_script(script)
+
+    def _normalize_script_if_elderly(self, script):
+        from core.style_presets import is_elderly_daily_style
+        if not script or not is_elderly_daily_style(self.kwargs.get("style", "")):
+            return script
+        from core.elderly_daily_pipeline import strengthen_elderly_daily_script
+        return strengthen_elderly_daily_script(script)
+
+    def _normalize_script_for_style(self, script):
+        script = self._normalize_script_if_tech(script)
+        return self._normalize_script_if_elderly(script)
+
     def run(self):
         try:
             if self.task_type == "generate_script":
@@ -225,16 +244,20 @@ class Worker(QObject):
                     name = ch.get("name", "")
                     if name in registry:
                         ch["portrait_path"] = registry[name]
+                        if not (ch.get("reference_image") or "").strip():
+                            ch["reference_image"] = registry[name]
                 self._prog(f"定妆照生成完成，共 {len(registry)} 个角色")
             except Exception as e:
                 self._prog(f"定妆照生成失败（不影响剧本）: {e}")
         
+        self.kwargs["script"] = script
         self.script_ready.emit(script)
         self.finished.emit(True, "剧本生成完成！")
 
     def _generate_images(self):
         self._check_cancel()
-        script = self.kwargs["script"]
+        script = self._normalize_script_for_style(self.kwargs["script"])
+        self.kwargs["script"] = script
         output_dir = self.kwargs["output_dir"]
         parser = StoryboardParser()
         storyboard = parser.parse(script)
@@ -248,7 +271,7 @@ class Worker(QObject):
         from core.motion_utils import effective_video_mode
         if effective_video_mode(config) == "animated":
             video_output = os.path.join(os.path.dirname(output_dir), "videos")
-            video_gen = VideoGenerator()
+            video_gen = VideoGenerator(config)
             story_meta = {
                 "title": storyboard.title or "",
                 "theme": storyboard.theme or "",
@@ -273,7 +296,8 @@ class Worker(QObject):
         )
 
     def _generate_audio(self):
-        script = self.kwargs["script"]
+        script = self._normalize_script_for_style(self.kwargs["script"])
+        self.kwargs["script"] = script
         output_dir = self.kwargs["output_dir"]
         parser = StoryboardParser()
         storyboard = parser.parse(script)
@@ -288,7 +312,8 @@ class Worker(QObject):
         self.finished.emit(True, "音频生成完成！")
 
     def _compose_video(self):
-        script = self.kwargs["script"]
+        script = self._normalize_script_for_style(self.kwargs["script"])
+        self.kwargs["script"] = script
         output_path = self.kwargs["output_path"]
         parser = StoryboardParser()
         storyboard = parser.parse(script)
@@ -307,7 +332,9 @@ class Worker(QObject):
         out_base = os.path.dirname(output_path) or get_output_dir()
         from core.motion_utils import ensure_motion_clips_for_storyboard
         ensure_motion_clips_for_storyboard(
-            storyboard, script, out_base, on_progress=self._prog
+            storyboard, script, out_base,
+            on_progress=self._prog,
+            config=self._task_config(),
         )
         for scene, s in zip(storyboard.scenes, script.get("scenes", [])):
             vp = getattr(scene, "video_path", None)
@@ -364,6 +391,32 @@ class Worker(QObject):
                     script = sync["script"]
                 self._check_cancel()
 
+        script = self._normalize_script_for_style(script)
+        self.kwargs["script"] = script
+
+        characters = script.get("characters", [])
+        if characters:
+            self._check_cancel()
+            self._prog("正在生成角色定妆照...")
+            image_output = os.path.join(output_dir, "images")
+            portrait_dir = os.path.join(image_output, "character_portraits")
+            image_gen = ImageGenerator(config)
+            try:
+                registry = image_gen.ensure_character_portraits(
+                    characters, portrait_dir, on_progress=self._prog
+                )
+                for ch in characters:
+                    if not isinstance(ch, dict):
+                        continue
+                    name = (ch.get("name") or "").strip()
+                    if name in registry:
+                        ch["portrait_path"] = registry[name]
+                        if not (ch.get("reference_image") or "").strip():
+                            ch["reference_image"] = registry[name]
+                self._prog(f"定妆照生成完成，共 {len(registry)} 个角色")
+            except Exception as e:
+                self._prog(f"定妆照生成失败（继续生成分镜图）: {e}")
+
         parser = StoryboardParser()
         storyboard = parser.parse(script)
         resolve_scene_media_from_disk(storyboard.scenes, output_dir)
@@ -381,7 +434,7 @@ class Worker(QObject):
         if effective_video_mode(config) == "animated":
             self._prog("正在生成动态视频片段（角色动作）...")
             video_output_dir = os.path.join(output_dir, "videos")
-            video_gen = VideoGenerator()
+            video_gen = VideoGenerator(config)
             story_meta = {
                 "title": storyboard.title or "",
                 "theme": storyboard.theme or "",
@@ -657,6 +710,7 @@ class MainWindow(QMainWindow):
 
         self.input_text = QTextEdit()
         self.input_text.setPlaceholderText(
+            "【银发日常】例：年轻人问鸡柳是啥，大爷大妈已读乱回；小院包饺子唠嗑\n"
             "【AI科普口播】例：DeepSeek 三个必会功能，程序员别再瞎用 ChatGPT\n"
             "【短剧喜剧】例：迪迦奥特曼送外卖总送错地址，被吐槽后倔强要证明自己…"
         )
@@ -668,6 +722,7 @@ class MainWindow(QMainWindow):
         self.style_combo = QComboBox()
         self.style_combo.addItems([
             "AI科普口播", "程序员口播",
+            "银发日常", "老头们的快乐生活",
             "喜剧", "动漫短片", "短剧", "霸道总裁", "复仇", "悬疑",
             "古装", "都市", "科幻",
         ])
@@ -977,9 +1032,14 @@ class MainWindow(QMainWindow):
         return self.thread is not None and self.thread.isRunning()
 
     def _on_style_changed(self, style_name: str):
-        from core.style_presets import is_tech_explainer_style, tech_explainer_ui_hints
+        from core.style_presets import (
+            is_tech_explainer_style, tech_explainer_ui_hints,
+            is_elderly_daily_style, elderly_daily_ui_hints,
+        )
         if is_tech_explainer_style(style_name):
             self.status_label.setText(tech_explainer_ui_hints())
+        elif is_elderly_daily_style(style_name):
+            self.status_label.setText(elderly_daily_ui_hints())
         else:
             from core.startup_check import startup_status_line
             self.status_label.setText(startup_status_line())
@@ -1148,6 +1208,8 @@ class MainWindow(QMainWindow):
     def on_script_ready(self, script):
         self.current_script = script
         self._sync_character_refs_panel(merge=True)
+        if hasattr(self, "character_refs_panel"):
+            self.character_refs_panel.refresh_images_from_script(script)
         self.update_scene_list()
         self.set_buttons_enabled(True)
 
@@ -1219,17 +1281,60 @@ class MainWindow(QMainWindow):
             return True
         return self.character_refs_panel.apply_to_script(self.current_script)
 
+    def _hydrate_script_media_from_disk(self):
+        """从 output 目录补全剧本中的定妆照与分镜图路径（供 UI 回显）。"""
+        if not self.current_script:
+            return
+        from core.scene_paths import resolve_scene_paths_in_script
+        from core.character_portraits import sync_portraits_from_disk_to_script
+
+        base = get_output_dir()
+        sync_portraits_from_disk_to_script(self.current_script, base)
+        resolve_scene_paths_in_script(self.current_script, base)
+
+    def _refresh_media_ui_after_task(self):
+        """生图/剧本任务完成后刷新定妆照卡片与分镜预览。"""
+        if not self.current_script:
+            return
+        self._hydrate_script_media_from_disk()
+        if hasattr(self, "character_refs_panel"):
+            self.character_refs_panel.refresh_images_from_script(self.current_script)
+        row = self._get_selected_scene_index()
+        self.update_scene_list()
+        if row < 0 and self.scene_list.count() > 0:
+            row = 0
+        if row >= 0:
+            self.scene_list.setCurrentRow(row)
+            item = self.scene_list.item(row)
+            if item:
+                self.on_scene_selected(item)
+
     def on_task_finished(self, success, message):
         self._script_sync = None
+        task_type = getattr(self, "_current_task_type", "")
+        media_tasks = (
+            "generate_script",
+            "generate_images",
+            "full_pipeline",
+            "regenerate_scene_image",
+        )
+        if success and getattr(self, "worker", None):
+            w_script = self.worker.kwargs.get("script")
+            if w_script and isinstance(w_script, dict):
+                self.current_script = w_script
+            if task_type in media_tasks:
+                self._hydrate_script_media_from_disk()
+                self._sync_character_refs_panel(merge=True)
         self._set_task_running(False)
         self._cancel_event = None
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(100 if success else 0)
-        task_type = getattr(self, "_current_task_type", "")
         if success:
             self.status_label.setText("完成！")
             self._auto_save_history()
-            if task_type.startswith("regenerate_scene") or task_type == "rewrite_scene_script":
+            if task_type in media_tasks:
+                self._refresh_media_ui_after_task()
+            elif task_type.startswith("regenerate_scene") or task_type == "rewrite_scene_script":
                 row = self._get_selected_scene_index()
                 if row >= 0:
                     self.update_scene_list()
@@ -1237,27 +1342,11 @@ class MainWindow(QMainWindow):
                     item = self.scene_list.item(row)
                     if item:
                         self.on_scene_selected(item)
-                if task_type == "rewrite_scene_script":
-                    QMessageBox.information(self, "完成", message)
-            else:
-                QMessageBox.information(self, "完成", message)
-            self._load_portraits_after_task()
+            QMessageBox.information(self, "完成", message)
         else:
             self.status_label.setText(message)
             if "取消" not in message:
                 QMessageBox.critical(self, "错误", message)
-
-    def _load_portraits_after_task(self):
-        """图片生成完成后，将定妆照加载到角色参考图面板。"""
-        task_type = getattr(self, "_current_task_type", "")
-        if task_type not in ("generate_images", "full_pipeline"):
-            return
-        if not hasattr(self, "character_refs_panel"):
-            return
-        portrait_dir = os.path.join(get_output_dir(), "images", "character_portraits")
-        matched = self.character_refs_panel.load_portraits_from_dir(portrait_dir)
-        if matched > 0:
-            logger.info(f"已从定妆照目录加载 {matched} 个角色头像")
 
     def on_progress(self, current, total, message):
         if total > 0:
@@ -1519,8 +1608,14 @@ class MainWindow(QMainWindow):
                 self.current_script = json.load(f)
             from core.storyboard import strengthen_script_continuity
             strengthen_script_continuity(self.current_script)
+            self._hydrate_script_media_from_disk()
             self._sync_character_refs_panel()
             self.update_scene_list()
+            if self.scene_list.count() > 0:
+                self.scene_list.setCurrentRow(0)
+                item = self.scene_list.item(0)
+                if item:
+                    self.on_scene_selected(item)
             self.set_buttons_enabled(True)
             QMessageBox.information(self, "完成", "剧本已加载: " + file_path)
         except Exception as e:
@@ -1606,8 +1701,16 @@ class MainWindow(QMainWindow):
         self.current_script = script
         from core.storyboard import strengthen_script_continuity
         strengthen_script_continuity(self.current_script)
+        self._hydrate_script_media_from_disk()
         self._sync_character_refs_panel()
+        if hasattr(self, "character_refs_panel"):
+            self.character_refs_panel.refresh_images_from_script(self.current_script)
         self.update_scene_list()
+        if self.scene_list.count() > 0:
+            self.scene_list.setCurrentRow(0)
+            item = self.scene_list.item(0)
+            if item:
+                self.on_scene_selected(item)
         self.set_buttons_enabled(True)
         self.status_label.setText(
             "已从历史记录加载剧本。" + self._pipeline_progress_hint()

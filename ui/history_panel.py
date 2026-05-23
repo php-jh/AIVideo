@@ -13,6 +13,7 @@ from PyQt5.QtCore import Qt, pyqtSignal, QSize
 from PyQt5.QtGui import QPixmap, QFont, QIcon
 
 from core.history_manager import list_records, delete_record, clear_all, load_script_by_id
+from ui.video_preview_dialog import play_video, open_video_externally
 
 THUMB_W, THUMB_H = 60, 80
 
@@ -48,10 +49,18 @@ class HistoryPanel(QWidget):
         self.btn_load.clicked.connect(self._on_load)
         btn_row.addWidget(self.btn_load)
 
+        self.btn_play_video = QPushButton("播放成片")
+        self.btn_play_video.setFixedHeight(32)
+        self.btn_play_video.setEnabled(False)
+        self.btn_play_video.setToolTip("在窗口内播放当前选中记录的成片")
+        self.btn_play_video.clicked.connect(self._on_play_video)
+        btn_row.addWidget(self.btn_play_video)
+
         self.btn_open_video = QPushButton("打开成片")
         self.btn_open_video.setObjectName("btnSecondary")
         self.btn_open_video.setFixedHeight(32)
         self.btn_open_video.setEnabled(False)
+        self.btn_open_video.setToolTip("用系统默认播放器打开成片")
         self.btn_open_video.clicked.connect(self._on_open_video)
         btn_row.addWidget(self.btn_open_video)
 
@@ -95,6 +104,7 @@ class HistoryPanel(QWidget):
             self.list_widget.addItem(item)
             self.btn_load.setEnabled(False)
             self.btn_delete.setEnabled(False)
+            self.btn_play_video.setEnabled(False)
             self.btn_open_video.setEnabled(False)
             return
 
@@ -137,6 +147,7 @@ class HistoryPanel(QWidget):
         if has:
             vp = self._records[row].get("video_path", "")
             video_ok = bool(vp and os.path.isfile(vp))
+        self.btn_play_video.setEnabled(has and video_ok)
         self.btn_open_video.setEnabled(has and video_ok)
         if has:
             rec = self._records[row]
@@ -159,28 +170,29 @@ class HistoryPanel(QWidget):
             return self._records[row].get("id")
         return None
 
-    def _on_open_video(self):
+    def _selected_record(self) -> Optional[Dict[str, Any]]:
         rec_id = self._get_selected_id()
         if not rec_id:
+            return None
+        return next((r for r in self._records if r.get("id") == rec_id), None)
+
+    def _on_play_video(self):
+        rec = self._selected_record()
+        if not rec:
+            QMessageBox.information(self, "提示", "请先选择一条历史记录。")
             return
-        rec = next((r for r in self._records if r.get("id") == rec_id), None)
+        video_path = rec.get("video_path", "")
+        play_video(self.window() or self, video_path, title=rec.get("title", ""))
+
+    def _on_open_video(self):
+        rec = self._selected_record()
         if not rec:
             return
         video_path = rec.get("video_path", "")
         if not video_path or not os.path.isfile(video_path):
             QMessageBox.information(self, "提示", "该记录没有可打开的成片文件。")
             return
-        import subprocess
-        import platform
-        try:
-            if platform.system() == "Windows":
-                os.startfile(video_path)
-            elif platform.system() == "Darwin":
-                subprocess.run(["open", video_path])
-            else:
-                subprocess.run(["xdg-open", video_path])
-        except Exception as e:
-            QMessageBox.critical(self, "错误", f"无法打开视频:\n{e}")
+        open_video_externally(video_path, self)
 
     def _on_load(self):
         rec_id = self._get_selected_id()

@@ -63,10 +63,13 @@ STYLE_ALIASES = {
     "喜剧": "搞笑",
     "霸道总裁": "霸总",
     "程序员口播": "AI科普口播",
+    "老头们的快乐生活": "银发日常",
+    "村里老人": "银发日常",
 }
 
 # AI/程序员口播科普（对标「讲AI的老韩」类：钩子+干货+口播）
 TECH_EXPLAINER_STYLES = frozenset({"AI科普口播", "程序员口播"})
+ELDERLY_DAILY_STYLES = frozenset({"银发日常", "老头们的快乐生活", "村里老人"})
 
 SYSTEM_PROMPT_TECH = """你是一位顶尖的竖屏「程序员 / AI 科普口播」编剧，擅长抖音知识类短视频。
 你的作品对标：程序员老韩、讲AI的老韩——3秒钩子、口语干货、适度吐槽、带小白入门。
@@ -129,7 +132,38 @@ STYLE_PROMPTS = {
         "语气：资深程序员、说人话、可自嘲、不学术腔；结尾一句行动建议+轻关注引导。"
         "genre 填「AI科技口播」；theme 写清本期一个核心知识点。"
     ),
+    "银发日常": (
+        "【银发搞笑日常】对标抖音博主「老头们的快乐生活」及大森子类：农村小院真实唠嗑、"
+        "年轻人普通话提问、老人各说各话/已读乱回、包饺子做饭赶集；治愈+好笑。"
+        "必须多人轮流对白（每人音色、性格不同），每人说话时有手势表情；genre「银发搞笑日常」。"
+    ),
 }
+
+SYSTEM_PROMPT_ELDERLY = """你是一位擅长「村里老人搞笑日常」的竖屏短视频编剧。
+作品对标：抖音博主「老头们的快乐生活」、大森子——真实乡土、多人唠嗑、对话驱动、少切镜少特效。
+【不是短剧霸总】禁止都市言情、宫斗；不要大段旁白念稿。
+
+【叙事硬性要求】
+- characters 必须 3～5 人：王大爷、李大妈、张叔等，年龄 65～80；description 写清真人细节（皱纹、花白发、肤色、朴素服装），禁止网红脸/美颜描述。
+- 每场戏以 dialogues 为主（每场至少 2 句对白，最好 3～4 句）；narration 能空则空，最多一句环境声。
+- 每个说话人在本镜 motion_intent 里都要有具体动作（拍腿、摆手、端碗、愣住、凑近问、竖大拇指等）。
+- visual_description 写清：谁在画面哪侧、正在做什么、表情；竖屏 9:16 中景/中全景，小院、厨房、饭桌、村口。
+- 镜头感：固定机位或纪录片轻微跟拍；场景之间是「硬切」不是电影转场；同一场地可连拍多镜。
+- 笑点来自：答非所问、方言感口语、夸张反应、生活误会，要写在具体台词里。
+
+你必须以JSON格式输出剧本，严格遵守以下格式："""
+
+ELDERLY_DAILY_EXTRA = """
+【银发日常 · 分镜规则（极重要）】
+1. 场景 4～7 个（不要 10 镜以上碎切）；total_duration 50～75 秒。
+2. 每场必须有 dialogues（≥2 条），character 必须是 characters 里已有的人名；line 口语、短、好笑。
+3. narration 原则上留空 ""；禁止用大段旁白代替对话。
+4. motion_intent 必须逐人写动作，格式示例：「王大爷拍大腿大笑；李大妈摆手吐槽；张叔端碗愣住」。
+5. 优先同一地点连拍（饭桌/小院/厨房），换地点最多 1 次且 continuity 写清原因。
+6. camera_movement 写「固定机位」或「轻微横移」，禁止写淡入淡出、旋转、闪白等专业转场词。
+7. mood 多用：欢乐、温馨、搞笑尬场；bgm_suggestion 写轻快民谣或乡村口琴，不要史诗配乐。
+8. 开场 3 秒：一句离谱提问或反差台词；结尾：包袱收束或温暖一句，不要冗长关注引导。
+"""
 
 # 喜剧/搞笑类额外强化
 COMEDY_EXTRA = """
@@ -178,15 +212,15 @@ VISUAL_STYLE_ANIME_EXTRA = """
 COMEDY_STYLES = frozenset({"搞笑", "喜剧", "动漫短片"})
 
 TECH_EXPLAINER_EXTRA = """
-【AI科普口播 · 分镜规则】
-1. 场景 8～12 个，total_duration 60～90 秒；单镜 duration 4～7 秒（旁白长的可 6～8 秒）。
-2. 第 1 镜：强钩子旁白 + 人物震惊/指屏幕/抱头等夸张但真实的反应（建立「老韩」出镜）。
-3. 第 2～N-1 镜：每镜对应一个干货点，narration 以「第1点…」「第2点…」或「首先/其次」串联；visual_description 画对应演示画面（软件界面、对比图、流程图感）。
-4. 最后 1～2 镜：总结金句 + 「关注我，下期讲…」类口播，不要冗长。
-5. characters 只保留 1 人：老韩，gender male，description 写清「亚裔男性程序员，休闲衬衫或卫衣，戴眼镜，对镜头口播」。
-6. dialogues 能省则省；若用 dialogues，character 只能是「老韩」，line 与 narration 勿重复堆砌。
-7. motion_intent 写「口播手势」「指向屏幕」「点头强调」，不要武打、不要恋爱动作。
-8. bgm_suggestion 填轻快科技感或 Lo-fi，不要悲情弦乐。
+【AI科普口播 · 一镜到底（极重要）】
+1. scenes 数组只能有 1 个场景（禁止多镜切换、禁止分点切成多 scene）。
+2. 该唯一场景的 narration 写完整期口播稿（60～90 秒能念完）：开场钩子 → 第1点/第2点/第3点干货 → 总结金句 → 轻量关注引导；用口语短句，可含「首先」「其次」「最后」。
+3. visual_description 固定为：竖屏9:16、固定机位中景、老韩坐在办公室书桌前对镜头说话、显示器背景虚化、全程同一构图不切镜头（不要画与旁白无关的夸张剧情画面）。
+4. dialogues 留空 []，全部用 narration；禁止两人对戏。
+5. characters 仅 1 人：老韩，gender male，description「亚裔男性程序员，休闲衬衫或卫衣，戴眼镜，对镜头口播」。
+6. duration 填 60～90（与 narration 字数匹配）；total_duration 与 duration 一致。
+7. motion_intent：对镜头口播、轻微手势；不要武打、恋爱、多人互动。
+8. bgm_suggestion：轻快科技感或 Lo-fi。
 """
 
 TECH_VISUAL_NOTE = (
@@ -212,6 +246,11 @@ def is_tech_explainer_style(style: str) -> bool:
     return key in TECH_EXPLAINER_STYLES or style in TECH_EXPLAINER_STYLES
 
 
+def is_elderly_daily_style(style: str) -> bool:
+    key = resolve_style_key(style)
+    return key in ELDERLY_DAILY_STYLES or (style or "").strip() in ELDERLY_DAILY_STYLES
+
+
 def build_story_prompt(
     user_input: str, style: str = "短剧", visual_style: str = "live_action"
 ) -> str:
@@ -219,12 +258,11 @@ def build_story_prompt(
     style_key = resolve_style_key(style)
     style_text = STYLE_PROMPTS.get(style_key, STYLE_PROMPTS["短剧"])
 
-    if is_tech_explainer_style(style):
-        vs = "live_action"
-        return f"""{SYSTEM_PROMPT_TECH}
+    if is_elderly_daily_style(style):
+        return f"""{SYSTEM_PROMPT_ELDERLY}
 
 {OUTPUT_FORMAT}
-{TECH_EXPLAINER_EXTRA}
+{ELDERLY_DAILY_EXTRA}
 {CONTINUITY_EXTRA}
 
 风格要求：
@@ -232,15 +270,32 @@ def build_story_prompt(
 
 用户输入的主题/关键词：{user_input}
 
-请根据以上要求，创作一期完整的「AI/程序员口播」分镜稿。注意：
-1. 总时长 60～90 秒；场景 8～12 个
+请创作一期「村里老人搞笑对话」JSON 剧本。注意：
+1. 3～5 个老人角色，每场至少 2 句对白，少旁白
+2. 每人每场都有具体肢体动作（写在 motion_intent）
+3. 4～7 个场景，同院/饭桌为主，剪辑感是硬切不要花哨转场
+4. visual_description 写清多人站位与正在做的动作
+5. 直接输出 JSON，不要 markdown
+6. 禁止写成霸总/悬疑长旁白纪录片"""
+
+    if is_tech_explainer_style(style):
+        return f"""{SYSTEM_PROMPT_TECH}
+
+{OUTPUT_FORMAT}
+{TECH_EXPLAINER_EXTRA}
+
+风格要求：
+{style_text}
+
+用户输入的主题/关键词：{user_input}
+
+请根据以上要求，创作一期「一镜到底」口播 JSON 剧本。注意：
+1. scenes 只能 1 条；narration 内写完钩子+干货点+总结（60～90 秒口播量）
 2. {TECH_VISUAL_NOTE}
-3. 每个场景 duration 4～7 秒，以旁白字数为准
+3. 画面是固定机位老韩对镜头，不要为多段旁白拆成多个 scene
 4. 直接输出 JSON，不要 markdown
-5. 每场必须有 narration（优先）或老韩的 dialogues
-6. story_beat 写清本镜是「钩子/第N点/总结/引导」哪一类
-7. characters 仅 1 人「老韩」，description 前后一致
-8. 禁止写成霸道总裁或情感短剧"""
+5. characters 仅「老韩」一人
+6. 禁止霸总/恋爱短剧；禁止旁白讲 A 话题、画面却画 B 剧情"""
 
     vs = (visual_style or "live_action").strip().lower()
     anime_block = VISUAL_STYLE_ANIME_EXTRA if vs == "anime_cartoon" else ""

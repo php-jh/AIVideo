@@ -25,6 +25,10 @@ def get_effective_image_api(config=None) -> str:
     api = (cfg.get("image_api") or "deepseek").strip().lower()
     if api == "siliconflow":
         return "siliconflow"
+    if api == "zhipu":
+        if has_zhipu_key(cfg):
+            return "zhipu"
+        return "pollinations"
     if has_siliconflow_key(cfg) and api in ("deepseek", "none", ""):
         return "siliconflow"
     return api
@@ -70,18 +74,26 @@ def describe_active_apis(config=None) -> str:
     vid = get_effective_video_backend(cfg)
     sf_key_ok = has_siliconflow_key(cfg)
     zhipu_key_ok = has_zhipu_key(cfg)
+    img_label = {
+        "siliconflow": "（SiliconFlow）",
+        "zhipu": "（智谱 GLM-Image）",
+        "pollinations": "（Pollinations）",
+    }.get(img, "")
     lines = [
-        f"生图: {img}" + ("（SiliconFlow API）" if img == "siliconflow" else ""),
+        f"生图: {img}{img_label}",
         f"分镜视频: {vid}" + ("（SiliconFlow 图生视频）" if vid == "siliconflow" else ("（智谱清影）" if vid == "zhipu" else "（本地 MoviePy 动效）")),
     ]
     if not sf_key_ok and (img == "siliconflow" or vid == "siliconflow"):
         lines.append("⚠ 未填写图片 API Key，SiliconFlow 无法调用")
     elif sf_key_ok:
         lines.append("已检测到 SiliconFlow Key")
-    if not zhipu_key_ok and vid == "zhipu":
-        lines.append("⚠ 未填写智谱 API Key，智谱清影无法调用")
-    elif zhipu_key_ok and vid == "zhipu":
-        lines.append("已检测到智谱 API Key")
+    if not zhipu_key_ok and (vid == "zhipu" or img == "zhipu"):
+        lines.append("⚠ 未填写智谱 API Key")
+    elif zhipu_key_ok:
+        if img == "zhipu":
+            lines.append("智谱 GLM-Image 已就绪（约 0.1 元/张）")
+        elif vid == "zhipu":
+            lines.append("已检测到智谱 API Key（清影）")
     return " | ".join(lines)
 
 

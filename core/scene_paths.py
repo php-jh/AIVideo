@@ -89,6 +89,58 @@ def count_scenes_with_visual_media(scenes) -> int:
     return n
 
 
+def resolve_scene_paths_in_script(script: dict, output_base: Optional[str] = None) -> int:
+    """
+    将 output/images|videos|audio 下已生成的文件路径写回 script['scenes'] 字典。
+    用于 UI 回显（剧本 JSON 里 path 缺失或文件已移动时）。
+    """
+    if not script or not isinstance(script, dict):
+        return 0
+    base = output_base or get_output_dir()
+    img_dir = os.path.join(base, "images")
+    vid_dir = os.path.join(base, "videos")
+    aud_dir = os.path.join(base, "audio")
+    fixed = 0
+
+    for scene in script.get("scenes") or []:
+        if not isinstance(scene, dict):
+            continue
+        n = int(scene.get("scene_number") or 0)
+        if n <= 0:
+            continue
+        prefix = f"scene_{n:02d}_"
+        changed = False
+
+        ip = (scene.get("image_path") or "").strip()
+        if not ip or not os.path.isfile(ip):
+            found = _latest_match(os.path.join(img_dir, prefix + "*.png"))
+            if not found:
+                found = _latest_match(os.path.join(img_dir, prefix + "*.jpg"))
+            if found:
+                scene["image_path"] = found
+                changed = True
+
+        vp = (scene.get("video_path") or "").strip()
+        if not vp or not os.path.isfile(vp):
+            found = _latest_match(os.path.join(vid_dir, prefix + "*.mp4"))
+            if found:
+                scene["video_path"] = found
+                changed = True
+
+        ap = (scene.get("audio_path") or "").strip()
+        if not ap or not os.path.isfile(ap):
+            found = _latest_match(os.path.join(aud_dir, prefix + "*.mp3"))
+            if not found:
+                found = _latest_match(os.path.join(aud_dir, prefix + "*.wav"))
+            if found:
+                scene["audio_path"] = found
+                changed = True
+
+        if changed:
+            fixed += 1
+    return fixed
+
+
 def scenes_missing_visual_media(scenes) -> List[int]:
     """缺少图片与视频的分镜编号列表。"""
     missing = []

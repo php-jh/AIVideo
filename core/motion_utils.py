@@ -22,6 +22,10 @@ def effective_video_mode(config=None) -> str:
 
 def should_generate_motion_clips(config=None) -> bool:
     cfg = config or load_config()
+    if cfg.get("single_take"):
+        return False
+    if cfg.get("elderly_daily_mode"):
+        return True
     if effective_video_mode(cfg) == "animated":
         return True
     if is_anime_cartoon(cfg):
@@ -30,8 +34,10 @@ def should_generate_motion_clips(config=None) -> bool:
     return False
 
 
-def build_dialogue_motion_hints(scene) -> str:
+def build_dialogue_motion_hints(scene, config=None) -> str:
     """根据台词与情绪生成图生视频动作描述（举手、说话等）。"""
+    cfg = config or load_config()
+    elderly = bool(cfg.get("elderly_daily_mode"))
     hints = []
     gesture_map = {
         "举手": "raises hand, arm lift gesture",
@@ -62,11 +68,19 @@ def build_dialogue_motion_hints(scene) -> str:
         char = (d.get("character") or "character").strip()
         emotion = (d.get("emotion") or "neutral").strip()
         line = (d.get("line") or "").strip()
-        hints.append(
-            f"{char} speaks with {emotion} emotion, anime lip-flap mouth movement, "
-            f"expressive eyes and eyebrows, subtle hand gesture while talking"
-            + (f", line: {line[:30]}" if line else "")
-        )
+        if elderly:
+            hints.append(
+                f"{char} speaking with {emotion} expression, realistic lip sync, "
+                f"mouth opens and closes while talking, natural head nod and hand gesture, "
+                f"elderly Chinese villager candid documentary style"
+                + (f", saying: {line[:40]}" if line else "")
+            )
+        else:
+            hints.append(
+                f"{char} speaks with {emotion} emotion, anime lip-flap mouth movement, "
+                f"expressive eyes and eyebrows, subtle hand gesture while talking"
+                + (f", line: {line[:30]}" if line else "")
+            )
 
     if not hints and (getattr(scene, "narration", "") or "").strip():
         hints.append(
@@ -81,12 +95,13 @@ def ensure_motion_clips_for_storyboard(
     script: dict,
     output_base: str,
     on_progress: Optional[Callable] = None,
+    config=None,
 ) -> None:
     """
     为缺少 video_path 的分镜生成动态短视频（SiliconFlow 或本地动效）。
     合成前调用，避免成片只有静图 Ken Burns。
     """
-    config = load_config()
+    config = config or load_config()
     if not should_generate_motion_clips(config):
         return
 
@@ -119,7 +134,7 @@ def ensure_motion_clips_for_storyboard(
             on_progress(0, 0, args[0])
 
     prog(0, 0, "正在生成分镜动态视频（角色会动）…")
-    vg = VideoGenerator()
+    vg = VideoGenerator(config)
     story_meta = {
         "title": getattr(storyboard, "title", "") or "",
         "theme": getattr(storyboard, "theme", "") or "",

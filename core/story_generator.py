@@ -9,6 +9,7 @@ from config import load_config
 from logger import get_logger
 from prompts.story_prompt import (
     build_story_prompt, is_comedy_style, is_tech_explainer_style,
+    is_elderly_daily_style,
 )
 from core.storyboard import ensure_scene_continuity_fields, strengthen_script_continuity
 
@@ -57,12 +58,14 @@ class StoryGenerator:
         visual_style = self.config.get("visual_style", "live_action")
         if style in ("动漫短片",):
             visual_style = "anime_cartoon"
-        elif is_tech_explainer_style(style):
+        elif is_tech_explainer_style(style) or is_elderly_daily_style(style):
             visual_style = "live_action"
         prompt = build_story_prompt(user_input, style, visual_style=visual_style)
         client = self._get_client()
         if is_tech_explainer_style(style):
             temperature = 0.78
+        elif is_elderly_daily_style(style):
+            temperature = 0.9
         elif is_comedy_style(style):
             temperature = 0.92
         else:
@@ -101,11 +104,24 @@ class StoryGenerator:
             # 验证剧本结构
             self._validate_script(script)
 
-            if on_progress:
-                on_progress("正在优化分镜连贯性（承上启下）...")
+            if is_elderly_daily_style(style):
+                from core.elderly_daily_pipeline import strengthen_elderly_daily_script
+                strengthen_elderly_daily_script(script)
+                if on_progress:
+                    on_progress("银发日常：强化对白与人物动作…")
+            elif is_tech_explainer_style(style):
+                if on_progress:
+                    on_progress("口播模式：整理为一镜到底分镜…")
+            else:
+                if on_progress:
+                    on_progress("正在优化分镜连贯性（承上启下）...")
 
-            script = self._refine_continuity_with_llm(script, user_input, style)
-            strengthen_script_continuity(script)
+                script = self._refine_continuity_with_llm(script, user_input, style)
+                strengthen_script_continuity(script)
+
+            if is_tech_explainer_style(style):
+                from core.tech_explainer_pipeline import normalize_tech_explainer_script
+                script = normalize_tech_explainer_script(script)
 
             scene_count = len(script.get('scenes', []))
             logger.info(f"剧本生成完成，共 {scene_count} 个场景")

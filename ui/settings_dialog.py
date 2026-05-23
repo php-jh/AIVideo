@@ -134,7 +134,9 @@ class SettingsDialog(QDialog):
 
         # 图片API设置
         self.image_api_combo = QComboBox()
-        self.image_api_combo.addItems(["deepseek", "siliconflow", "pollinations", "dall-e", "none"])
+        self.image_api_combo.addItems([
+            "deepseek", "siliconflow", "zhipu", "pollinations", "dall-e", "none",
+        ])
         current_image_api = self.config.get("image_api", "deepseek")
         idx = self.image_api_combo.findText(current_image_api)
         if idx >= 0:
@@ -152,9 +154,34 @@ class SettingsDialog(QDialog):
         self.zhipu_api_key_edit.setEchoMode(QLineEdit.Password)
         self.zhipu_api_key_edit.setText(self.config.get("zhipu_api_key", ""))
         self.zhipu_api_key_edit.setPlaceholderText(
-            "智谱清影 API Key（用于图生视频）"
+            "智谱开放平台 API Key（GLM-Image 生图 + 清影视频共用）"
         )
         api_layout.addRow("智谱 API Key:", self.zhipu_api_key_edit)
+
+        self.zhipu_image_model_edit = QLineEdit()
+        self.zhipu_image_model_edit.setText(
+            self.config.get("zhipu_image_model", "glm-image")
+        )
+        self.zhipu_image_model_edit.setPlaceholderText("glm-image")
+        self.zhipu_image_model_edit.setToolTip(
+            "智谱文生图模型，定妆照/分镜选 image_api=zhipu 时使用。\n"
+            "文档: https://docs.bigmodel.cn/cn/guide/models/image-generation/glm-image"
+        )
+        api_layout.addRow("智谱生图模型:", self.zhipu_image_model_edit)
+
+        self.zhipu_image_size_portrait_edit = QLineEdit()
+        self.zhipu_image_size_portrait_edit.setText(
+            self.config.get("zhipu_image_size_portrait", "1056x1568")
+        )
+        self.zhipu_image_size_portrait_edit.setPlaceholderText("1056x1568 竖版人像")
+        api_layout.addRow("智谱定妆照尺寸:", self.zhipu_image_size_portrait_edit)
+
+        self.zhipu_image_size_edit = QLineEdit()
+        self.zhipu_image_size_edit.setText(
+            self.config.get("zhipu_image_size", "1088x1472")
+        )
+        self.zhipu_image_size_edit.setPlaceholderText("1088x1472 竖屏分镜")
+        api_layout.addRow("智谱分镜图尺寸:", self.zhipu_image_size_edit)
 
         self.pollinations_model_combo = QComboBox()
         self.pollinations_model_combo.addItems(["flux", "turbo"])
@@ -531,6 +558,11 @@ class SettingsDialog(QDialog):
         self.test_zhipu_btn.clicked.connect(self.test_zhipu)
         button_layout.addWidget(self.test_zhipu_btn)
 
+        self.test_glm_image_btn = QPushButton("测试 GLM-Image")
+        self.test_glm_image_btn.setToolTip("测试智谱 GLM-Image 人物肖像生图")
+        self.test_glm_image_btn.clicked.connect(self.test_glm_image)
+        button_layout.addWidget(self.test_glm_image_btn)
+
         self.ok_btn = QPushButton("确定")
         self.ok_btn.clicked.connect(self.accept)
         self.ok_btn.setDefault(True)
@@ -587,6 +619,14 @@ class SettingsDialog(QDialog):
             overview.append(f"  API Key: {self._mask_key(draft.get('image_api_key', ''))}")
         elif actual_image_api == "dall-e":
             overview.append(f"  API Key: {self._mask_key(draft.get('image_api_key', ''))}")
+        elif actual_image_api == "zhipu":
+            overview.append(f"  模型: {draft.get('zhipu_image_model', 'glm-image')}")
+            overview.append(
+                f"  定妆照尺寸: {draft.get('zhipu_image_size_portrait', '1056x1568')}"
+            )
+            overview.append(f"  分镜尺寸: {draft.get('zhipu_image_size', '1088x1472')}")
+            overview.append(f"  API Key: {self._mask_key(draft.get('zhipu_api_key', ''))}")
+            overview.append("  计费: 约 0.1 元/张（以智谱控制台为准）")
         overview.append("")
         overview.append("【视频生成】")
         overview.append(f"  配置后端: {draft.get('video_animated_backend', 'local')}")
@@ -729,12 +769,16 @@ class SettingsDialog(QDialog):
             QMessageBox.warning(self, "警告", "请先填写「智谱 API Key」！")
             return
         try:
-            r = requests.get(
+            from core.http_client import request_with_retry, zhipu_ssl_hint
+
+            r = request_with_retry(
+                "GET",
                 "https://open.bigmodel.cn/api/paas/v4/models",
                 headers={
                     "Authorization": f"Bearer {api_key}",
                 },
                 timeout=30,
+                max_attempts=5,
             )
             if r.status_code == 200:
                 QMessageBox.information(
@@ -752,7 +796,34 @@ class SettingsDialog(QDialog):
                 f"当前Key: {api_key[:10]}...",
             )
         except Exception as e:
-            QMessageBox.critical(self, "智谱清影失败", str(e))
+            from core.http_client import zhipu_ssl_hint
+
+            QMessageBox.critical(self, "智谱清影失败", f"{e}\n{zhipu_ssl_hint()}")
+
+    def test_glm_image(self):
+        """测试智谱 GLM-Image 人物肖像生图。"""
+        api_key = self.zhipu_api_key_edit.text().strip()
+        if not api_key:
+            QMessageBox.warning(self, "警告", "请先填写「智谱 API Key」！")
+            return
+        model = self.zhipu_image_model_edit.text().strip() or "glm-image"
+        size = self.zhipu_image_size_portrait_edit.text().strip() or "1056x1568"
+        try:
+            from core.zhipu_image import generate_glm_image
+            generate_glm_image(
+                api_key,
+                "竖屏纪实人物肖像，中国农村老人，头肩构图，真实皮肤皱纹，自然光，高清照片",
+                model=model,
+                size=size,
+            )
+            QMessageBox.information(
+                self,
+                "GLM-Image 可用",
+                f"智谱 GLM-Image 调用成功。\n模型: {model}\n尺寸: {size}\n\n"
+                "请在「图片API」中选择 zhipu 并保存设置后生成定妆照。",
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "GLM-Image 失败", str(e))
 
     def accept(self):
         """保存设置（合并写入，保留配置文件中未在界面展示的项目）"""
@@ -772,6 +843,9 @@ class SettingsDialog(QDialog):
             "image_api": image_api,
             "image_api_key": sf_key,
             "zhipu_api_key": self.zhipu_api_key_edit.text().strip(),
+            "zhipu_image_model": self.zhipu_image_model_edit.text().strip(),
+            "zhipu_image_size_portrait": self.zhipu_image_size_portrait_edit.text().strip(),
+            "zhipu_image_size": self.zhipu_image_size_edit.text().strip(),
             "pollinations_model": self.pollinations_model_combo.currentText(),
             "siliconflow_image_model": self.siliconflow_image_model_edit.text().strip(),
             "siliconflow_image_size": self.siliconflow_image_size_edit.text().strip(),

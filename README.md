@@ -44,7 +44,7 @@ pip install -r requirements.txt
 | 配置项 | 说明 |
 |--------|------|
 | DeepSeek API Key | 必填，在 https://platform.deepseek.com 获取 |
-| 图片 API | 推荐 `siliconflow`（填 SiliconFlow Key）或 `pollinations`（免费） |
+| 图片 API | `zhipu`（[GLM-Image](https://docs.bigmodel.cn/cn/guide/models/image-generation/glm-image)，人像推荐）/ `siliconflow` / `pollinations`（免费） |
 | 分镜动态视频 | 可选 SiliconFlow 图生视频（需 Key，云端 GPU） |
 
 ## 使用流程
@@ -61,9 +61,18 @@ pip install -r requirements.txt
 ### 分步生成
 1. **生成剧本** → **生成图片+动效** → **生成配音** → **合成视频**
 
-### AI科普口播（程序员老韩类）
+### 银发日常（抖音「老头们的快乐生活」类）
 
-1. 风格选 **「AI科普口播」** 或 **「程序员口播」**（二者相同）
+1. 风格选 **「银发日常」** 或 **「老头们的快乐生活」**
+2. 主题示例：年轻人问网络梗、小院包饺子、赶集唠嗑
+3. 设置 → **图片API 选 `zhipu`**，填写**智谱 API Key**，可点「测试 GLM-Image」；定妆照走中文人像 prompt（约 0.1 元/张）
+4. 为 **王大爷、李大妈、张叔** 等上传真实生活照（最像真人）；程序会自动分配不同配音音色
+5. **一键生成**：硬切少转场、多人对白、本地说话动效（嘴部微动）
+6. 可在角色卡片里手动改「配音」下拉，固定每人音色
+
+### AI科普口播（程序员老韩类 · 一镜到底）
+
+1. 风格选 **「AI科普口播」** 或 **「程序员口播」**（二者相同；自动合并为 **单镜头** 口播，不再多镜切图）
 2. 输入本期主题，例如：`DeepSeek 三个必会功能，别再瞎用 ChatGPT`
 3. 角色参考图里给「老韩」选固定 **男声音色**（可选上传半身照作一致性参考）
 4. **一键生成** 或分步生成；程序会自动偏向 **真人纪实 + 静图口播**（少动效）

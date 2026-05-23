@@ -4,7 +4,7 @@
 from typing import List
 
 from config import load_config
-from core.api_routing import has_siliconflow_key, describe_active_apis
+from core.api_routing import has_siliconflow_key, has_zhipu_key, describe_active_apis
 from core.ffmpeg_utils import resolve_ffmpeg_path, get_configured_ffmpeg_path
 
 
@@ -44,6 +44,12 @@ def run_startup_checks() -> List[str]:
         issues.append(
             "图片 API 选择了 SiliconFlow，但未填写图片 API Key。\n"
             "生图将失败，请填写 Key 或改用 Pollinations。"
+        )
+
+    if image_api == "zhipu" and not has_zhipu_key(config):
+        issues.append(
+            "图片 API 选择了智谱 GLM-Image，但未填写智谱 API Key。\n"
+            "请在设置中填写，或改用 Pollinations。"
         )
 
     return issues

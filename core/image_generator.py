@@ -28,8 +28,11 @@ from core.character_portraits import (
     safe_char_filename,
     pick_portrait_for_scene,
     build_character_bible,
+    enrich_character_for_portrait,
+    _is_elderly_character,
 )
 from core.api_routing import get_effective_image_api, has_siliconflow_key
+from core.zhipu_image import generate_glm_image
 
 logger = get_logger("image_generator")
 
@@ -45,6 +48,17 @@ _IMAGE_PROMPT_REALISM_SUFFIX = (
     "no beauty filter, no airbrushing, no plastic skin, no CGI look, no anime, no cartoon, "
     "documentary-style candid shot, available light photography, "
     "real human body proportions, natural body shape, realistic posture"
+)
+
+# 定妆照专用：比场景后缀更强调证件照/选角照级真人质感
+_PORTRAIT_REALISM_SUFFIX = (
+    ", ultra photorealistic headshot, real human photographed not illustrated, "
+    "Canon EOS R5 85mm f/1.8 portrait lens, shallow depth of field, "
+    "individual skin pores visible, fine wrinkles and age lines, natural asymmetry, "
+    "real iris detail and moisture in eyes, individual eyebrow hairs, "
+    "authentic Chinese face, unretouched RAW photo look, "
+    "NO anime, NO cartoon, NO 3D render, NO doll, NO wax figure, NO beauty app filter, "
+    "NO plastic skin, NO airbrushed porcelain skin, NO CGI, NO illustration"
 )
 
 _IMAGE_PROMPT_ANIME_SUFFIX = (
@@ -203,7 +217,8 @@ class ImageGenerator:
                              output_dir: str,
                              on_progress=None,
                              script_characters=None,
-                             portrait_registry=None) -> str:
+                             portrait_registry=None,
+                             force_regenerate: bool = False) -> str:
         """
         为单个场景生成图片
 
@@ -211,6 +226,7 @@ class ImageGenerator:
             scene: 分镜场景
             output_dir: 输出目录
             on_progress: 进度回调
+            force_regenerate: 跳过磁盘旧图 hash 匹配，强制调用 API
 
         Returns:
             生成的图片文件路径
@@ -234,31 +250,32 @@ class ImageGenerator:
         filename = f"scene_{scene.scene_number:02d}_{content_hash}.png"
         filepath = os.path.join(output_dir, filename)
 
-        # 1) 当前场景文件已存在
-        if self._is_valid_image_file(filepath):
-            if on_progress:
-                on_progress(f"场景 {scene.scene_number} 图片已存在，跳过")
-            scene.image_path = filepath
-            self._content_hash_cache[content_hash] = filepath
-            return filepath
+        if not force_regenerate:
+            # 1) 当前场景文件已存在
+            if self._is_valid_image_file(filepath):
+                if on_progress:
+                    on_progress(f"场景 {scene.scene_number} 图片已存在，跳过")
+                scene.image_path = filepath
+                self._content_hash_cache[content_hash] = filepath
+                return filepath
 
-        # 2) 同内容 hash 的其他场景已生成 → 复用，不调 API
-        duplicate_src = self._find_image_by_content_hash(output_dir, content_hash)
-        if duplicate_src:
-            return self._reuse_scene_image(
-                duplicate_src, filepath, scene, content_hash, on_progress,
-                reuse_label="与已有分镜画面相同",
-            )
-
-        # 3) 剧本里已记录且文件有效的 image_path（同 hash 优先）
-        existing_ip = getattr(scene, "image_path", None) or ""
-        if self._is_valid_image_file(existing_ip):
-            existing_base = os.path.basename(existing_ip)
-            if existing_base.endswith(f"_{content_hash}.png"):
+            # 2) 同内容 hash 的其他场景已生成 → 复用，不调 API
+            duplicate_src = self._find_image_by_content_hash(output_dir, content_hash)
+            if duplicate_src:
                 return self._reuse_scene_image(
-                    existing_ip, filepath, scene, content_hash, on_progress,
-                    reuse_label="使用已保存分镜图",
+                    duplicate_src, filepath, scene, content_hash, on_progress,
+                    reuse_label="与已有分镜画面相同",
                 )
+
+            # 3) 剧本里已记录且文件有效的 image_path（同 hash 优先）
+            existing_ip = getattr(scene, "image_path", None) or ""
+            if self._is_valid_image_file(existing_ip):
+                existing_base = os.path.basename(existing_ip)
+                if existing_base.endswith(f"_{content_hash}.png"):
+                    return self._reuse_scene_image(
+                        existing_ip, filepath, scene, content_hash, on_progress,
+                        reuse_label="使用已保存分镜图",
+                    )
 
         if on_progress:
             if ref_path:
@@ -292,6 +309,8 @@ class ImageGenerator:
         deepseek_key = (self.config.get("deepseek_api_key") or "").strip()
         if on_progress and image_api == "siliconflow":
             on_progress(f"场景 {scene.scene_number}：正在调用 SiliconFlow 文生图 API…")
+        elif on_progress and image_api == "zhipu":
+            on_progress(f"场景 {scene.scene_number}：正在调用智谱 GLM-Image…")
         anime = self._visual_style_anime()
         prompt_suffix = _IMAGE_PROMPT_ANIME_SUFFIX if anime else _IMAGE_PROMPT_REALISM_SUFFIX
 
@@ -306,9 +325,14 @@ class ImageGenerator:
         try:
             if ref_path and image_api not in ("siliconflow",):
                 if on_progress:
+                    hint = (
+                        "智谱 GLM-Image 为纯文生图，无法图生图锁脸；"
+                        if image_api == "zhipu"
+                        else ""
+                    )
                     on_progress(
-                        f"场景 {scene.scene_number}：定妆照/参考图需 SiliconFlow 图生图才能锁脸，"
-                        "当前 API 仅文字描述，易出现换脸；建议在设置中改用 siliconflow"
+                        f"场景 {scene.scene_number}：{hint}"
+                        "已用定妆照文字+参考约束；上传参考图作定妆照最像真人"
                     )
             if image_api == "deepseek":
                 image_data = self._generate_with_deepseek(base_prompt)
@@ -341,6 +365,17 @@ class ImageGenerator:
                     img2img_strength=img2img_strength,
                     on_progress=on_progress,
                 )
+            elif image_api == "zhipu":
+                zh_prompt = self._build_scene_prompt_zh(scene, script_characters=script_chars)
+                if ref_path:
+                    who = portrait_char or "角色"
+                    zh_prompt = (
+                        f"与定妆照为同一人（{who}），五官脸型一致，仅改变姿势与场景。"
+                        + zh_prompt
+                    )
+                image_data = self._generate_with_zhipu_image(
+                    zh_prompt, portrait=False, on_progress=on_progress
+                )
             elif image_api == "dall-e":
                 image_data = self._generate_with_dalle(prompt)
             elif image_api == "pollinations":
@@ -371,7 +406,8 @@ class ImageGenerator:
             raise RuntimeError(f"场景 {scene.scene_number} 图片生成失败: {e}")
 
     def generate_all_images(self, scenes: list, output_dir: str,
-                            on_progress=None, script_characters=None) -> list:
+                            on_progress=None, script_characters=None,
+                            force_regenerate: bool = True) -> list:
         """
         批量生成所有场景图片
 
@@ -379,6 +415,7 @@ class ImageGenerator:
             scenes: 分镜场景列表
             output_dir: 输出目录
             on_progress: 进度回调 fn(current, total, message)
+            force_regenerate: True 时跳过磁盘旧图缓存，强制调用 API
 
         Returns:
             图片路径列表
@@ -386,7 +423,11 @@ class ImageGenerator:
         image_paths = []
         total = len(scenes)
         os.makedirs(output_dir, exist_ok=True)
+
+        # 批量重生成时仍建索引（供同批内去重用），但不再复用外部旧图
         self._content_hash_cache = self._index_images_in_dir(output_dir)
+        if force_regenerate:
+            self._content_hash_cache.clear()
 
         portrait_registry = {}
         if self.config.get("character_consistency", True) and script_characters:
@@ -395,10 +436,23 @@ class ImageGenerator:
                 script_characters, portrait_dir, on_progress=on_progress
             )
 
+        master_path = None
         for i, scene in enumerate(scenes):
             def progress_wrapper(msg):
                 if on_progress:
                     on_progress(i + 1, total, msg)
+
+            if self.config.get("single_take") and master_path and os.path.isfile(master_path):
+                from shutil import copyfile
+                content_hash = self._compute_scene_content_hash(
+                    scene, master_path, "", self.config
+                )
+                filename = f"scene_{scene.scene_number:02d}_{content_hash}.png"
+                filepath = os.path.join(output_dir, filename)
+                copyfile(master_path, filepath)
+                scene.image_path = filepath
+                image_paths.append(filepath)
+                continue
 
             filepath = self.generate_scene_image(
                 scene,
@@ -406,7 +460,10 @@ class ImageGenerator:
                 progress_wrapper,
                 script_characters=script_characters,
                 portrait_registry=portrait_registry,
+                force_regenerate=force_regenerate,
             )
+            if self.config.get("single_take") and not master_path:
+                master_path = filepath
             image_paths.append(filepath)
 
         return image_paths
@@ -452,10 +509,18 @@ class ImageGenerator:
                     f"正在为角色「{name}」生成定妆照 ({i + 1}/{total})…",
                 )
 
-            prompt = self._build_portrait_prompt(ch)
             image_api = get_effective_image_api(self.config)
+            if image_api == "zhipu":
+                prompt = self._build_portrait_prompt_zh(ch)
+            else:
+                prompt = self._build_portrait_prompt(ch)
+            user_ref_for_i2i = user_ref if user_ref and os.path.isfile(user_ref) else ""
             try:
-                if image_api == "siliconflow":
+                if image_api == "zhipu":
+                    data = self._generate_with_zhipu_image(
+                        prompt, portrait=True, on_progress=on_progress
+                    )
+                elif image_api == "siliconflow":
                     sf_key = (self.config.get("image_api_key") or "").strip()
                     if not sf_key:
                         raise RuntimeError("SiliconFlow Key 未配置")
@@ -466,16 +531,32 @@ class ImageGenerator:
                         except Exception:
                             pass
                     self._throttle_siliconflow(on_progress)
-                    data = self._generate_with_siliconflow(prompt, sf_key, on_progress=on_progress)
+                    ref_i2i = user_ref_for_i2i
+                    strength = None
+                    if ref_i2i:
+                        try:
+                            strength = float(
+                                self.config.get("portrait_img2img_strength", 0.35)
+                            )
+                        except (TypeError, ValueError):
+                            strength = 0.35
+                    data = self._generate_with_siliconflow(
+                        prompt,
+                        sf_key,
+                        reference_image_path=ref_i2i or "",
+                        img2img_strength=strength,
+                        on_progress=on_progress,
+                    )
                 elif image_api == "deepseek":
                     data = self._generate_with_deepseek(prompt)
                 else:
-                    suf = (
-                        _IMAGE_PROMPT_ANIME_SUFFIX
-                        if self._visual_style_anime()
-                        else _IMAGE_PROMPT_REALISM_SUFFIX
-                    )
-                    data = self._generate_with_pollinations(prompt.rstrip(".,; ") + suf)
+                    if self._visual_style_anime():
+                        suf = _IMAGE_PROMPT_ANIME_SUFFIX
+                        data = self._generate_with_pollinations(
+                            prompt.rstrip(".,; ") + suf, portrait=False
+                        )
+                    else:
+                        data = self._generate_portrait_pollinations(prompt)
             except Exception as e:
                 print(f"警告：角色「{name}」定妆照生成失败: {e}")
                 continue
@@ -489,24 +570,117 @@ class ImageGenerator:
 
     def _build_portrait_prompt(self, ch: dict) -> str:
         name = (ch.get("name") or "").strip()
-        desc = (ch.get("description") or "").strip()
         gender = (ch.get("gender") or "").strip()
-        extra = ", ".join(x for x in (desc, gender) if x)
+        elderly = bool(self.config.get("elderly_daily_mode"))
+        extra = enrich_character_for_portrait(ch, elderly_daily=elderly)
+        if gender and gender not in extra:
+            extra = f"{extra}, {gender}" if extra else gender
+
         if self._visual_style_anime():
             return (
                 f"2D anime character design portrait, head and shoulders, front view, "
                 f"character {name}, {extra}, clean lineart, neutral simple background, "
                 f"character reference sheet, single person, identity lock for entire series"
             )
+
+        if elderly or _is_elderly_character(ch):
+            scene_ctx = (
+                "documentary casting photo of Chinese village elder, "
+                "warm natural daylight from window, simple indoor wall background, "
+                "wearing everyday cotton jacket or apron, honest relaxed expression, "
+            )
+        else:
+            scene_ctx = (
+                "professional casting headshot of real Chinese actor, "
+                "soft natural window light, neutral indoor background, "
+                "relaxed authentic expression, "
+            )
+
         return (
-            f"hyperrealistic portrait photograph, head and shoulders, front facing camera, "
-            f"Chinese person {name}, {extra}, "
-            f"natural window light from the side, no artificial lighting, "
-            f"neutral cream colored wall background, "
-            f"natural skin texture with visible pores, no makeup or minimal makeup, "
-            f"identity reference photo for TV drama casting, single person, "
-            f"sharp focus on eyes, natural eyebrows, realistic hair strands, "
-            f"candid unposed expression, no smile or subtle natural smile"
+            f"{scene_ctx}"
+            f"single person only, head and shoulders, facing camera, sharp focus on eyes, "
+            f"character name {name}, {extra}, "
+            f"photographed with full-frame camera, 85mm portrait lens, "
+            f"real photograph not digital art"
+        )
+
+    def _build_portrait_prompt_zh(self, ch: dict) -> str:
+        """智谱 GLM-Image 用中文描述（模型对中文人像更友好）。"""
+        name = (ch.get("name") or "").strip()
+        elderly = bool(self.config.get("elderly_daily_mode"))
+        extra = enrich_character_for_portrait(ch, elderly_daily=elderly)
+        gender = (ch.get("gender") or "").strip()
+        if gender == "male":
+            extra += "，中国男性"
+        elif gender == "female":
+            extra += "，中国女性"
+
+        if elderly or _is_elderly_character(ch):
+            style = (
+                "竖屏纪实人物肖像摄影，头肩构图，正对镜头，单人，"
+                "中国农村老人真实相貌，自然窗光，朴素背景，"
+                "皮肤皱纹与毛孔清晰可见，无美颜磨皮，无动漫插画，"
+                "高清真实照片，纪录片选角照风格"
+            )
+        else:
+            style = (
+                "竖屏高清人物肖像摄影，头肩构图，正对镜头，单人，"
+                "真实中国普通人，自然光线，无网红滤镜，"
+                "皮肤质感真实，证件照级清晰度，真实照片非插画"
+            )
+        return f"{style}。角色：{name}。{extra}"
+
+    def _build_scene_prompt_zh(
+        self, scene: StoryboardScene, script_characters=None
+    ) -> str:
+        """分镜画面中文 prompt（GLM-Image）。"""
+        parts = []
+        vd = (getattr(scene, "visual_description", None) or "").strip()
+        if vd:
+            parts.append(vd)
+        mi = (getattr(scene, "motion_intent", None) or "").strip()
+        if mi:
+            parts.append(f"动作：{mi}")
+        for d in getattr(scene, "dialogues", None) or []:
+            if isinstance(d, dict) and (d.get("line") or "").strip():
+                ch = (d.get("character") or "").strip()
+                parts.append(f"{ch}说：{d.get('line', '')[:60]}")
+        names = scene_character_names(scene)
+        if script_characters and names:
+            bible = build_character_bible(script_characters, set(names))
+            if bible:
+                parts.append(bible[:200])
+        body = "，".join(parts) if parts else "竖屏生活场景"
+        prefix = (
+            "竖屏9:16纪实摄影，真实中国人物与环境，自然光，"
+            "高清照片，无动漫无插画，透视正常，"
+        )
+        if self.config.get("elderly_daily_mode"):
+            prefix += "农村小院或饭桌日常，"
+        return prefix + body
+
+    def _generate_with_zhipu_image(
+        self, prompt: str, portrait: bool = False, on_progress=None
+    ) -> bytes:
+        api_key = (self.config.get("zhipu_api_key") or "").strip()
+        model = (self.config.get("zhipu_image_model") or "glm-image").strip()
+        if portrait:
+            size = (self.config.get("zhipu_image_size_portrait") or "1056x1568").strip()
+        else:
+            size = (self.config.get("zhipu_image_size") or "1088x1472").strip()
+        if on_progress:
+            on_progress(
+                f"正在调用智谱 GLM-Image（{model}，{size}）…"
+            )
+        return generate_glm_image(api_key, prompt, model=model, size=size)
+
+    def _generate_portrait_pollinations(self, base_prompt: str) -> bytes:
+        """定妆照：竖版人像比例 + 增强负面词 + 可选 enhance。"""
+        full = base_prompt.rstrip(".,; ") + _PORTRAIT_REALISM_SUFFIX
+        return self._generate_with_pollinations(
+            full,
+            portrait=True,
+            negative_extra=self._build_portrait_negative_prompt(),
         )
 
     def _build_image_prompt(self, scene: StoryboardScene, script_characters=None) -> str:
@@ -580,6 +754,39 @@ class ImageGenerator:
 
         if scene.visual_description:
             prompt_parts.append(scene.visual_description)
+
+        if self.config.get("include_narration_in_image_prompt") or self.config.get("single_take"):
+            narration = (getattr(scene, "narration", None) or "").strip()
+            if narration:
+                snippet = narration.replace("\n", " ").strip()[:200]
+                prompt_parts.append(
+                    "presenter speaking to camera about this exact topic, "
+                    f"visual must match spoken content: {snippet}"
+                )
+
+        if self.config.get("portrait_realism_boost") or self.config.get("elderly_daily_mode"):
+            prompt_parts.append(
+                "authentic unretouched Chinese people, documentary photograph not illustration, "
+                "natural wrinkles and skin texture, real fabric clothing"
+            )
+
+        if self.config.get("include_dialogues_in_image_prompt") or self.config.get("elderly_daily_mode"):
+            if dialogues:
+                for d in dialogues:
+                    if not isinstance(d, dict):
+                        continue
+                    ch = (d.get("character") or "").strip()
+                    line = (d.get("line") or "").strip()
+                    emo = (d.get("emotion") or "").strip()
+                    if ch and line:
+                        prompt_parts.append(
+                            f"{ch} speaking with {emo or 'natural'} expression, "
+                            f"mouth open mid-sentence, gesture while saying: {line[:80]}"
+                        )
+                prompt_parts.append(
+                    "group of elderly Chinese villagers in courtyard or kitchen, "
+                    "candid documentary photo, warm daylight, each person visibly acting"
+                )
 
         anchor = (getattr(scene, "visual_anchor", None) or "").strip()
         if anchor:
@@ -695,6 +902,17 @@ class ImageGenerator:
 
         return ", ".join(prompt_parts)
 
+    def _build_portrait_negative_prompt(self) -> str:
+        """定妆照专用负面词（比场景更狠，压 AI 脸/网红脸）。"""
+        base = self._build_negative_prompt(anime=False)
+        extra = (
+            "young model face, influencer face, k-pop idol makeup, porcelain doll, "
+            "symmetrical perfect face, uncanny valley, synthetic skin, "
+            "overprocessed HDR portrait, glamour retouch, studio glamour lighting, "
+            "anime eyes, big sparkly eyes, illustration, vector portrait"
+        )
+        return f"{base}, {extra}"
+
     def _build_negative_prompt(self, anime: bool = False) -> str:
         """负面 prompt：真人/动漫分支。"""
         if anime:
@@ -735,28 +953,41 @@ class ImageGenerator:
         ]
         return ", ".join(negative_parts)
 
-    def _generate_with_pollinations(self, prompt: str) -> bytes:
+    def _generate_with_pollinations(
+        self,
+        prompt: str,
+        portrait: bool = False,
+        negative_extra: str = "",
+    ) -> bytes:
         """
         使用 Pollinations AI 生成图片（完全免费，无需API Key）
 
         API: https://image.pollinations.ai/prompt/{prompt}
-        支持参数: width, height, nologo, seed, model, negative
+        支持参数: width, height, nologo, seed, model, negative, enhance
         """
-        # URL编码prompt
         import urllib.parse
         encoded_prompt = urllib.parse.quote(prompt)
-        
-        # 构建负面prompt并编码
+
         negative_prompt = self._build_negative_prompt(self._visual_style_anime())
+        if negative_extra:
+            negative_prompt = f"{negative_prompt}, {negative_extra}"
         encoded_negative = urllib.parse.quote(negative_prompt)
 
-        # Pollinations AI 竖屏尺寸（与 DALL·E 竖屏比例接近）
-        width = 1024
-        height = 1792
+        if portrait:
+            width, height = 768, 1152
+        else:
+            width = 1024
+            height = 1792
 
         model = (self.config.get("pollinations_model") or "flux").strip()
+        if portrait and self.config.get("pollinations_portrait_model"):
+            model = (self.config.get("pollinations_portrait_model") or model).strip()
         if model.lower() in ("", "default"):
             model = "flux"
+
+        enhance = "true" if (
+            portrait and self.config.get("pollinations_portrait_enhance", True)
+        ) else "false"
 
         url = (
             f"https://image.pollinations.ai/prompt/{encoded_prompt}"
@@ -764,6 +995,7 @@ class ImageGenerator:
             f"&nologo=true&seed={hashlib.md5(prompt.encode()).hexdigest()[:8]}"
             f"&negative={encoded_negative}"
             f"&model={urllib.parse.quote(model)}"
+            f"&enhance={enhance}"
         )
 
         # 下载图片，带重试

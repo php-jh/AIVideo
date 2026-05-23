@@ -253,11 +253,52 @@ class SubtitleGenerator:
         return txt_clip
 
     @staticmethod
+    def create_subtitle_clips_segmented(
+        text: str,
+        total_duration: float,
+        width: int = 1080,
+        height: int = 1920,
+        time_offset: float = 0.0,
+    ) -> list:
+        """
+        将长旁白按句切分，生成带时间轴的字幕 clip 列表（口播一镜到底用）。
+        """
+        from moviepy.editor import ImageClip
+        import numpy as np
+        from core.tech_explainer_pipeline import split_narration_for_subtitles
+
+        clips = []
+        segments = split_narration_for_subtitles(text, total_duration)
+        if not segments:
+            return clips
+
+        t = time_offset
+        sub_width = width - 80
+        subtitle_y = height - 280
+        for seg_text, seg_dur in segments:
+            pil_img = SubtitleGenerator._render_subtitle_image(
+                seg_text, width=sub_width, fontsize=48
+            )
+            bg = Image.new("RGB", pil_img.size, (0, 0, 0))
+            bg.paste(pil_img, mask=pil_img.split()[3])
+            frame = np.array(bg)
+            txt_clip = ImageClip(frame, duration=seg_dur)
+            txt_clip = (
+                txt_clip.set_position(("center", subtitle_y))
+                .set_start(t)
+                .set_duration(seg_dur)
+            )
+            clips.append(txt_clip)
+            t += seg_dur
+        return clips
+
+    @staticmethod
     def create_subtitle_clips_for_scene(
         scene,
         scene_start_time: float,
         width: int = 1080,
         height: int = 1920,
+        segment_long_narration: bool = False,
     ) -> list:
         """
         为单个场景创建字幕clip列表（用PIL渲染，不依赖ImageMagick）
@@ -269,7 +310,6 @@ class SubtitleGenerator:
         import numpy as np
 
         clips = []
-        duration = getattr(scene, "duration", 4.0)
 
         # 合并文字
         text_parts = []
@@ -290,6 +330,12 @@ class SubtitleGenerator:
             return clips
 
         full_text = "\n".join(text_parts)
+        duration = getattr(scene, "duration", 4.0)
+
+        if segment_long_narration and len(full_text) > 24:
+            return SubtitleGenerator.create_subtitle_clips_segmented(
+                full_text, duration, width, height, scene_start_time
+            )
 
         # 用PIL渲染字幕图片
         sub_width = width - 80

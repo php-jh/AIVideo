@@ -20,7 +20,7 @@ DEFAULT_CONFIG = {
     "deepseek_api_key": "",
     "deepseek_base_url": "https://api.deepseek.com",
     "deepseek_model": "deepseek-chat",
-    "image_api": "siliconflow",  # deepseek / siliconflow / pollinations / dall-e / none
+    "image_api": "siliconflow",  # deepseek / siliconflow / zhipu / pollinations / dall-e / none
     "image_api_key": "",  # SiliconFlow / DALL-E 等生图 Key（选 siliconflow 时填 SiliconFlow）
     # 文生图 POST /v1/images/generations，模型以控制台「to-image」为准（见官方文档）
     # https://docs.siliconflow.cn/cn/api-reference/images/images-generations
@@ -35,6 +35,10 @@ DEFAULT_CONFIG = {
     "siliconflow_rate_limit_retries": 8,
     # Pollinations 文生图模型：flux 细节与人体更稳；turbo 更快但易有 AI 感
     "pollinations_model": "flux",
+    # 定妆照：Pollinations enhance 润色 prompt；竖版人像 768x1152
+    "pollinations_portrait_enhance": True,
+    "pollinations_portrait_model": "",
+    "portrait_img2img_strength": 0.35,
     # 生图后缩放到视频分辨率：letterbox 完整保留画面（推荐，减少裁切错位）；crop 铺满但可能切头切脸
     "image_fit_mode": "letterbox",
     # 角色参考图：blend=参考图+分镜描述 AI 生图（推荐）；direct=直接用参考图作分镜图再图生视频
@@ -57,13 +61,17 @@ DEFAULT_CONFIG = {
     # 合成时无 video_path：auto 时动漫用本地动效 MP4，真人用 Ken Burns
     "scene_clip_fallback": "auto",
     # animated：每镜生成动态短视频（动漫风格下自动视为开启）
-    "video_mode": "animated",
+    "video_mode": "static",
     # 动态片段：siliconflow=云端图生视频（举手/说话等更像动画）；zhipu=智谱清影；local=本机轻量动效（无 GPU 可备用）
     "video_animated_backend": "zhipu",
     # SiliconFlow /v1/video/submit 图生视频模型（以控制台为准）
     "siliconflow_video_model": "Wan-AI/Wan2.2-I2V-A14B",
     # 智谱清影配置
     "zhipu_api_key": "",
+    # GLM-Image 文生图 https://docs.bigmodel.cn/cn/guide/models/image-generation/glm-image
+    "zhipu_image_model": "glm-image",
+    "zhipu_image_size_portrait": "1056x1568",
+    "zhipu_image_size": "1088x1472",
     "zhipu_video_model": "cogvideox-3",
     "zhipu_video_size": "720x1280",
     "zhipu_video_fps": 30,

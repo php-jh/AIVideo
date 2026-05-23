@@ -52,8 +52,8 @@ class VideoGenerator:
         "愤怒": {"zoom_range": 0.04, "brightness_var": 0.10, "particle_type": "spark", "warm_shift": -0.04, "parallax": 0.03},
     }
 
-    def __init__(self):
-        self.config = load_config()
+    def __init__(self, config=None):
+        self.config = config or load_config()
         self.width = self.config.get("video_width", 1080)
         self.height = self.config.get("video_height", 1920)
         self.fps = self.config.get("video_fps", 24)
@@ -195,11 +195,19 @@ class VideoGenerator:
             random.seed(abs(hash(scene.image_path)) % (2**32))
 
             # 创建动态clip（简化版，不分割图片）
+            has_dialogue = bool(getattr(scene, "dialogues", None))
+            lip_sync = bool(
+                self.config.get("elderly_lip_sync_local")
+                and self.config.get("elderly_daily_mode")
+                and has_dialogue
+            )
+
             def make_frame(t):
-                progress = t / duration
+                progress = t / duration if duration > 0 else 0
                 return self._apply_simple_effects(
                     img, t, duration, progress, preset, particles, zoom_trend,
                     anime_motion=anime_motion,
+                    lip_sync=lip_sync,
                 )
 
             clip = VideoClip(make_frame, duration=duration)
@@ -284,7 +292,7 @@ class VideoGenerator:
         if motion:
             parts.append(f"motion to animate: {motion}")
 
-        dialogue_motion = build_dialogue_motion_hints(scene)
+        dialogue_motion = build_dialogue_motion_hints(scene, self.config)
         if dialogue_motion:
             parts.append(f"character acting: {dialogue_motion}")
 
@@ -312,6 +320,13 @@ class VideoGenerator:
                 "mouth opens and closes for dialogue lip-sync style, blinking eyes, eyebrow motion, "
                 "subtle squash-and-stretch, hair and clothes follow body movement, fluid inbetweening, "
                 "full-body or upper-body acting, NOT a static slideshow, no live-action morphing, stable lineart"
+            )
+        elif self.config.get("elderly_daily_mode"):
+            parts.append(
+                "elderly Chinese villagers talking in courtyard, realistic lip sync, "
+                "mouth opens and closes while speaking, natural hand gestures and head nods, "
+                "candid documentary vertical video, stable faces, warm daylight, "
+                "no slideshow, subtle body movement throughout"
             )
         else:
             parts.append(
@@ -532,7 +547,7 @@ class VideoGenerator:
         if motion:
             parts.append(f"motion: {motion}")
 
-        dialogue_motion = build_dialogue_motion_hints(scene)
+        dialogue_motion = build_dialogue_motion_hints(scene, self.config)
         if dialogue_motion:
             parts.append(f"character acting: {dialogue_motion}")
 
@@ -557,15 +572,24 @@ class VideoGenerator:
 
     def _zhipu_generate_video(self, api_key: str, payload: dict) -> str:
         """调用智谱清影视频生成 API。"""
-        r = requests.post(
-            "https://open.bigmodel.cn/api/paas/v4/videos/generations",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            json=payload,
-            timeout=120,
-        )
+        from core.http_client import request_with_retry, zhipu_ssl_hint
+
+        try:
+            r = request_with_retry(
+                "POST",
+                "https://open.bigmodel.cn/api/paas/v4/videos/generations",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+                timeout=120,
+                max_attempts=5,
+            )
+        except Exception as e:
+            raise RuntimeError(
+                f"智谱清影提交任务失败: {e} {zhipu_ssl_hint()}"
+            ) from e
         try:
             data = r.json()
         except Exception:
@@ -582,13 +606,22 @@ class VideoGenerator:
 
     def _zhipu_query_result(self, api_key: str, task_id: str) -> dict:
         """查询智谱清影异步任务结果。"""
-        r = requests.get(
-            f"https://open.bigmodel.cn/api/paas/v4/async-result/{task_id}",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-            },
-            timeout=60,
-        )
+        from core.http_client import request_with_retry, zhipu_ssl_hint
+
+        try:
+            r = request_with_retry(
+                "GET",
+                f"https://open.bigmodel.cn/api/paas/v4/async-result/{task_id}",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                },
+                timeout=60,
+                max_attempts=5,
+            )
+        except Exception as e:
+            raise RuntimeError(
+                f"智谱清影查询任务状态失败: {e} {zhipu_ssl_hint()}"
+            ) from e
         try:
             data = r.json()
         except Exception:
@@ -647,14 +680,35 @@ class VideoGenerator:
 
         task_id = self._zhipu_generate_video(api_key, payload)
 
+        from core.http_client import is_transient_http_error
+
         poll_interval = max(3, int(self.config.get("zhipu_video_poll_interval", 5)))
         max_wait = max(180, int(self.config.get("zhipu_video_poll_timeout_sec", 1800)))
         deadline = time.monotonic() + max_wait
         last_status = ""
         poll_i = 0
+        transient_poll_errors = 0
+        max_transient_poll_errors = max(
+            30, int(self.config.get("zhipu_video_poll_max_ssl_retries", 40))
+        )
 
         while time.monotonic() < deadline:
-            data = self._zhipu_query_result(api_key, task_id)
+            try:
+                data = self._zhipu_query_result(api_key, task_id)
+            except Exception as e:
+                if not is_transient_http_error(e):
+                    raise
+                transient_poll_errors += 1
+                if transient_poll_errors > max_transient_poll_errors:
+                    raise
+                if on_progress:
+                    on_progress(
+                        f"场景 {scene.scene_number} 查询智谱状态网络波动，"
+                        f"将重试（{transient_poll_errors}/{max_transient_poll_errors}）…"
+                    )
+                time.sleep(min(poll_interval * 2, 15))
+                continue
+            transient_poll_errors = 0
             status = (data.get("task_status") or "").strip()
             if status and status != last_status:
                 last_status = status
@@ -672,7 +726,14 @@ class VideoGenerator:
                     raise RuntimeError(f"智谱清影响应缺少 url: {data}")
                 if on_progress:
                     on_progress(f"场景 {scene.scene_number} 正在下载视频…")
-                vr = requests.get(url, timeout=300)
+                from core.http_client import request_with_retry, zhipu_ssl_hint
+
+                try:
+                    vr = request_with_retry("GET", url, timeout=300, max_attempts=5)
+                except Exception as e:
+                    raise RuntimeError(
+                        f"下载智谱视频失败: {e} {zhipu_ssl_hint()}"
+                    ) from e
                 if vr.status_code != 200:
                     raise RuntimeError(f"下载视频失败 HTTP {vr.status_code}")
                 with open(filepath, "wb") as f:
@@ -767,7 +828,8 @@ class VideoGenerator:
         return False
 
     def _apply_simple_effects(
-        self, img_pil, t, duration, progress, preset, particles, zoom_trend=0, anime_motion=False
+        self, img_pil, t, duration, progress, preset, particles, zoom_trend=0,
+        anime_motion=False, lip_sync=False,
     ):
         """
         简化版效果应用：不分割图片，保持完整显示
@@ -818,7 +880,10 @@ class VideoGenerator:
         
         # 粘贴到画布
         canvas.paste(scaled_img, (offset_x, offset_y))
-        
+
+        if lip_sync:
+            canvas = self._apply_lip_sync_overlay(canvas, t)
+
         # 颜色增强
         enhancer = ImageEnhance.Color(canvas)
         canvas = enhancer.enhance(1.15)
@@ -896,6 +961,29 @@ class VideoGenerator:
         arr = np.clip(arr * vignette, 0, 255).astype(np.uint8)
         
         return arr
+
+    def _apply_lip_sync_overlay(self, canvas: Image.Image, t: float) -> Image.Image:
+        """口播/对白镜：在画面中部模拟嘴部张合（本地动效，非真口型对齐）。"""
+        w, h = canvas.size
+        cx = w // 2
+        cy = int(h * 0.40)
+        flap = 0.5 + 0.5 * np.sin(t * 13.5) * 0.6 + 0.4 * np.sin(t * 8.7)
+        rx = max(8, int(w * 0.055))
+        ry = max(4, int(h * 0.022 * (0.65 + 0.7 * flap)))
+        overlay = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(overlay)
+        alpha = int(28 + 55 * flap)
+        draw.ellipse(
+            [cx - rx, cy - ry, cx + rx, cy + ry],
+            fill=(255, 235, 220, alpha),
+        )
+        draw.ellipse(
+            [cx - rx // 2, cy - max(2, ry // 3), cx + rx // 2, cy + max(2, ry // 2)],
+            fill=(80, 40, 40, int(18 + 25 * flap)),
+        )
+        base = canvas.convert("RGBA")
+        base = Image.alpha_composite(base, overlay)
+        return base.convert("RGB")
 
     def _apply_effects(
         self, img_array, t, duration, progress, preset, particles
